@@ -1,8 +1,7 @@
 """
-Lee's Stock Portfolio Engine - Finnhub Edition
+Lee's Stock Portfolio Engine - Finnhub Edition v2
 """
-
-import json, os, time, requests
+import json, os, time, requests, re
 from datetime import datetime
 
 FINNHUB_KEY = os.getenv("FINNHUB_API_KEY", "")
@@ -127,6 +126,19 @@ def score_stock(data):
     return round(min(max(score, 0), 100), 1)
 
 
+def extract_json(text):
+    """Robustly extract JSON from Claude response."""
+    text = text.strip()
+    # Remove markdown code blocks
+    text = re.sub(r"```(?:json)?", "", text).strip()
+    # Find the first { and last }
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1:
+        text = text[start:end+1]
+    return json.loads(text)
+
+
 def run_ai_analysis(top_stocks, client):
     stocks_summary = json.dumps([{
         "ticker": s["ticker"], "name": s["name"], "sector": s["sector"],
@@ -148,9 +160,13 @@ def run_ai_analysis(top_stocks, client):
         "Select 10-12 stocks, balance sectors, total allocation = 100%.\n"
         "1-line bull thesis and bear risk per stock.\n"
         "Give portfolio a name and overall thesis.\n\n"
-        "Respond ONLY with valid JSON (no markdown):\n"
-        "{\n  \"portfolio_name\": \"...\",\n  \"overall_thesis\": \"...\",\n"
-        f"  \"date\": \"{date_str}\",\n"
+        "YOU MUST respond with ONLY a raw JSON object. No markdown, no code blocks, no explanation.\n"
+        "Start your response with { and end with }\n"
+        "Format:\n"
+        "{\n"
+        "  \"portfolio_name\": \"...\"\n"
+        "  \"overall_thesis\": \"...\"\n"
+        f"  \"date\": \"{date_str}\"\n"
         "  \"stocks\": [{\"ticker\":\"AAPL\",\"name\":\"Apple\",\"sector\":\"Technology\","
         "\"allocation_pct\":10,\"score\":78,\"bull_case\":\"...\","
         "\"bear_risk\":\"...\",\"analyst_target\":230,\"current_price\":255}]\n}"
@@ -159,11 +175,9 @@ def run_ai_analysis(top_stocks, client):
         model="claude-opus-4-6", max_tokens=2000,
         messages=[{"role": "user", "content": prompt}]
     )
-    raw = response.content[0].text.strip()
-    if "```" in raw:
-        raw = raw.split("```")[1]
-        if raw.startswith("json"): raw = raw[4:]
-    return json.loads(raw.strip())
+    raw = response.content[0].text
+    print(f"AI response length: {len(raw)}, first 100: {raw[:100]}")
+    return extract_json(raw)
 
 
 def build_portfolio(client, status_callback=None):
