@@ -78,9 +78,9 @@ async def post_portfolio(channel, portfolio):
         for s in chunk:
             ticker = s["ticker"]
             alloc = s["allocation"]
-            price = s.get("current_price", "N/A")
+            price = s.get("price", "N/A")
             target = s.get("analyst_target")
-            score = s.get("score", "N/A")
+            score = s.get("ai_score", "N/A")
             bull = s.get("bull_case", "N/A")
             bear = s.get("bear_risk", "N/A")
             emoji = sector_emoji(s.get("sector", ""))
