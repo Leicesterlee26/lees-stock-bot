@@ -49,10 +49,10 @@ def allocation_bar(pct: float) -> str:
 
 
 async def post_portfolio(channel, portfolio):
-    stocks = portfolio.get("stocks", [])
+    stocks = portfolio.get("picks", [])
     date_str = portfolio.get("date", datetime.now().strftime("%d %b %Y"))
     name = portfolio.get("portfolio_name", "Lee's AI Portfolio")
-    thesis = portfolio.get("overall_thesis", "")
+    thesis = portfolio.get("summary", "")
 
     header = discord.Embed(title=f"🤖 {name}", description=f"*{thesis}*", colour=COLOUR_GOLD, timestamp=datetime.now())
     header.add_field(name="📅 Date", value=date_str, inline=True)
@@ -63,10 +63,10 @@ async def post_portfolio(channel, portfolio):
     await asyncio.sleep(0.5)
 
     alloc_lines = []
-    for s in sorted(stocks, key=lambda x: x["allocation_pct"], reverse=True):
-        bar = allocation_bar(s["allocation_pct"])
+    for s in sorted(stocks, key=lambda x: x.get("allocation", 0), reverse=True):
+        bar = allocation_bar(s["allocation"])
         emoji = sector_emoji(s.get("sector", ""))
-        alloc_lines.append(f"{emoji} **${s['ticker']}** {bar} `{s['allocation_pct']}%`")
+        alloc_lines.append(f"{emoji} **${s['ticker']}** {bar} `{s['allocation']}%`")
 
     alloc_embed = discord.Embed(title="📊 Portfolio Allocation", description="\n".join(alloc_lines), colour=COLOUR_BLUE)
     await channel.send(embed=alloc_embed)
@@ -77,7 +77,7 @@ async def post_portfolio(channel, portfolio):
         embed = discord.Embed(colour=COLOUR_PURPLE)
         for s in chunk:
             ticker = s["ticker"]
-            alloc = s["allocation_pct"]
+            alloc = s["allocation"]
             price = s.get("current_price", "N/A")
             target = s.get("analyst_target")
             score = s.get("score", "N/A")
@@ -140,9 +140,9 @@ async def cmd_holdings(ctx):
     if not current_portfolio:
         await ctx.send("❌ No portfolio yet. Run `!portfolio` first.")
         return
-    stocks = current_portfolio.get("stocks", [])
-    lines = [f"{sector_emoji(s.get('sector',''))} **${s['ticker']}** — `{s['allocation_pct']}%` | Score: {s.get('score','N/A')}"
-             for s in sorted(stocks, key=lambda x: x["allocation_pct"], reverse=True)]
+    stocks = current_portfolio.get("picks", [])
+    lines = [f"{sector_emoji(s.get('sector',''))} **${s['ticker']}** — `{s['allocation']}%` | Score: {s.get('score','N/A')}"
+             for s in sorted(stocks, key=lambda x: x["allocation"], reverse=True)]
     embed = discord.Embed(title="📋 Current Portfolio", description="\n".join(lines), colour=COLOUR_GOLD, timestamp=datetime.now())
     embed.set_footer(text=f"Generated: {current_portfolio.get('date','Unknown')}")
     await ctx.send(embed=embed)
