@@ -1,5 +1,6 @@
 """
-Lee's Stock Portfolio Engine - Finnhub Edition v2
+Lee's Stock Portfolio Engine - Finnhub Edition v3
+Fixed: bulletproof JSON parsing, strict AI prompt, full error handling
 """
 import json, os, time, requests, re
 from datetime import datetime
@@ -30,53 +31,59 @@ def fget(endpoint, params):
         if r.status_code == 200:
             return r.json()
     except Exception as e:
-        print(f"API error {endpoint}: {e}")
-    return {}
+        print(f"fget error {endpoint}: {e}")
+    return None
 
 
 def fetch_stock_data(ticker):
     try:
-        quote = fget("/quote", {"symbol": ticker})
-        price = quote.get("c")
-        if not price:
+        quote   = fget("/quote", {"symbol": ticker}) or {}
+        profile = fget("/stock/profile2", {"symbol": ticker}) or {}
+        metrics = fget("/stock/metric", {"symbol": ticker, "metric": "all"}) or {}
+        rectrnd = fget("/stock/recommendation", {"symbol": ticker}) or []
+        pricetgt= fget("/stock/price-target", {"symbol": ticker}) or {}
+
+        price = quote.get("c", 0)
+        if not price or price == 0:
             return None
-        metrics_resp = fget("/stock/metric", {"symbol": ticker, "metric": "all"})
-        m = metrics_resp.get("metric", {})
-        momentum_1mo = m.get("4WeekPriceReturnDaily")
-        momentum_3mo = m.get("13WeekPriceReturnDaily")
-        pe = m.get("peBasicExclExtraTTM") or m.get("peTTM")
-        eps_growth = m.get("epsGrowthTTMYoy")
-        rev_growth = m.get("revenueGrowthTTMYoy")
+
+        name        = profile.get("name", ticker)
+        sector      = profile.get("finnhubIndustry", "Unknown")
+        market_cap  = profile.get("marketCapitalization", 0) * 1_000_000
+
+        m = metrics.get("metric", {})
+        pe          = m.get("peNormalizedAnnual") or m.get("peBasicExclExtraTTM")
+        eps_growth  = m.get("epsGrowth3Y") or m.get("epsGrowthTTMYoy")
+        rev_growth  = m.get("revenueGrowth3Y") or m.get("revenueGrowthTTMYoy")
         profit_margin = m.get("netProfitMarginTTM")
-        high_52w = m.get("52WeekHigh")
-        low_52w = m.get("52WeekLow")
-        profile = fget("/stock/profile2", {"symbol": ticker})
-        name = profile.get("name", ticker)
-        sector = profile.get("finnhubIndustry", "Unknown")
-        market_cap = profile.get("marketCapitalization", 0)
-        recs = fget("/stock/recommendation", {"symbol": ticker})
-        rec_key = "none"
+        high_52w    = m.get("52WeekHigh")
+        low_52w     = m.get("52WeekLow")
+
+        price_1mo_ago = m.get("priceRelativeToS&P50013Week") or 0
+        price_3mo_ago = m.get("priceRelativeToS&P50026Week") or 0
+        momentum_1mo  = ((price - (price / (1 + price_1mo_ago/100))) / (price / (1 + price_1mo_ago/100)) * 100) if price_1mo_ago else 0
+        momentum_3mo  = ((price - (price / (1 + price_3mo_ago/100))) / (price / (1 + price_3mo_ago/100)) * 100) if price_3mo_ago else 0
+
+        # Simpler momentum from 52w data
+        if high_52w and low_52w and high_52w > 0:
+            momentum_1mo = round(((price - low_52w) / (high_52w - low_52w)) * 20 - 10, 2)
+            momentum_3mo = momentum_1mo * 1.5
+
+        rec_key = ""
+        if rectrnd and isinstance(rectrnd, list) and len(rectrnd) > 0:
+            latest = rectrnd[0]
+            rec_key = latest.get("rating", "")
+
         analyst_target = None
-        if recs and isinstance(recs, list) and len(recs) > 0:
-            latest = recs[0]
-            strong_buy = latest.get("strongBuy", 0)
-            buy = latest.get("buy", 0)
-            hold = latest.get("hold", 0)
-            sell = latest.get("sell", 0) + latest.get("strongSell", 0)
-            total = strong_buy + buy + hold + sell
-            if total > 0:
-                buy_ratio = (strong_buy + buy) / total
-                if buy_ratio >= 0.7: rec_key = "strong_buy"
-                elif buy_ratio >= 0.5: rec_key = "buy"
-                elif sell / total >= 0.4: rec_key = "sell"
-                else: rec_key = "hold"
-        pt = fget("/stock/price-target", {"symbol": ticker})
-        if pt.get("targetMean"):
-            analyst_target = pt["targetMean"]
+        if isinstance(pricetgt, dict) and pricetgt.get("targetMean"):
+            analyst_target = pricetgt["targetMean"]
+
         return {
-            "ticker": ticker, "name": name, "sector": sector,
+            "ticker": ticker,
+            "name": name,
+            "sector": sector,
             "price": round(price, 2),
-            "market_cap_b": round(market_cap / 1000, 1),
+            "market_cap_b": round(market_cap / 1_000_000_000, 1),
             "forward_pe": round(pe, 2) if pe else None,
             "earnings_growth": round(eps_growth / 100, 4) if eps_growth else None,
             "revenue_growth": round(rev_growth / 100, 4) if rev_growth else None,
@@ -85,7 +92,8 @@ def fetch_stock_data(ticker):
             "recommendation": rec_key,
             "momentum_1mo": round(momentum_1mo, 2) if momentum_1mo is not None else 0,
             "momentum_3mo": round(momentum_3mo, 2) if momentum_3mo is not None else 0,
-            "52w_high": high_52w, "52w_low": low_52w,
+            "52w_high": high_52w,
+            "52w_low": low_52w,
         }
     except Exception as e:
         print(f"Error fetching {ticker}: {e}")
@@ -100,7 +108,7 @@ def score_stock(data):
     score += min(max(m3 * 0.3, -10), 10)
     fpe = data.get("forward_pe")
     if fpe and 0 < fpe < 50:
-        if fpe < 15: score += 10
+        if fpe < 15:   score += 10
         elif fpe < 25: score += 5
         elif fpe > 35: score -= 8
     eg = data.get("earnings_growth")
@@ -117,32 +125,84 @@ def score_stock(data):
     if data.get("analyst_target") and data.get("price"):
         try:
             upside = ((data["analyst_target"] - data["price"]) / data["price"]) * 100
-            if upside > 20: score += 7
-            elif upside > 10: score += 4
-            elif upside < -5: score -= 5
-        except Exception: pass
-    if m1 > 5: score += 5
-    elif m1 < -10: score -= 3
+            if upside > 20:   score += 10
+            elif upside > 10: score += 5
+            elif upside < 0:  score -= 5
+        except Exception:
+            pass
     return round(min(max(score, 0), 100), 1)
 
 
-def extract_json(text):
-    """Robustly extract JSON from Claude response."""
-    text = text.strip()
-    # Remove markdown code blocks
+def clean_json(text):
+    """
+    Bulletproof JSON extractor.
+    Handles: markdown fences, preamble text, trailing commentary,
+    apostrophes in values, truncated responses.
+    """
+    if not text:
+        raise ValueError("Empty response from AI")
+
+    # Strip markdown code fences
     text = re.sub(r"```(?:json)?", "", text).strip()
-    # Find the first { and last }
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1:
-        text = text[start:end+1]
-    return json.loads(text)
+    text = re.sub(r"```", "", text).strip()
+
+    # Remove any preamble before the first {
+    brace_start = text.find("{")
+    if brace_start == -1:
+        raise ValueError(f"No JSON object found in response. Got: {text[:200]}")
+    text = text[brace_start:]
+
+    # Find the matching closing brace by counting depth
+    depth = 0
+    end_pos = -1
+    in_string = False
+    escape_next = False
+    for i, ch in enumerate(text):
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == "\\" and in_string:
+            escape_next = True
+            continue
+        if ch == '"' and not escape_next:
+            in_string = not in_string
+        if not in_string:
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end_pos = i
+                    break
+
+    if end_pos == -1:
+        # Try rfind as last resort
+        end_pos = text.rfind("}")
+        if end_pos == -1:
+            raise ValueError(f"No closing brace found. Got: {text[:200]}")
+
+    text = text[:end_pos + 1]
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        # Last resort: try to fix common issues
+        # Replace smart quotes
+        text = text.replace("\u2018", "'").replace("\u2019", "'")
+        text = text.replace("\u201c", '"').replace("\u201d", '"')
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            raise ValueError(f"JSON parse failed after cleanup: {e}. Snippet: {text[max(0,e.pos-50):e.pos+50]}")
 
 
 def run_ai_analysis(top_stocks, client):
     stocks_summary = json.dumps([{
-        "ticker": s["ticker"], "name": s["name"], "sector": s["sector"],
-        "score": s["score"], "price": s["price"],
+        "ticker": s["ticker"],
+        "name": s["name"],
+        "sector": s["sector"],
+        "score": s["score"],
+        "price": s["price"],
         "forward_pe": s.get("forward_pe"),
         "momentum_1mo": s.get("momentum_1mo"),
         "momentum_3mo": s.get("momentum_3mo"),
@@ -150,34 +210,61 @@ def run_ai_analysis(top_stocks, client):
         "analyst_target": s.get("analyst_target"),
         "recommendation": s.get("recommendation"),
     } for s in top_stocks], indent=2)
-    today = datetime.now().strftime("%d %B %Y")
-    date_str = datetime.now().strftime("%d %b %Y")
+
     prompt = (
-        f"You are an autonomous AI portfolio manager. Today is {today}.\n"
-        f"You have scored {len(top_stocks)} S&P 500 stocks. "
-        "Select the BEST 10-12 for a growth-focused portfolio.\n\n"
-        f"Stock scoring data:\n{stocks_summary}\n\n"
-        "Select 10-12 stocks, balance sectors, total allocation = 100%.\n"
-        "1-line bull thesis and bear risk per stock.\n"
-        "Give portfolio a name and overall thesis.\n\n"
-        "YOU MUST respond with ONLY a raw JSON object. No markdown, no code blocks, no explanation.\n"
-        "Start your response with { and end with }\n"
-        "Format:\n"
-        "{\n"
-        "  \"portfolio_name\": \"...\"\n"
-        "  \"overall_thesis\": \"...\"\n"
-        f"  \"date\": \"{date_str}\"\n"
-        "  \"stocks\": [{\"ticker\":\"AAPL\",\"name\":\"Apple\",\"sector\":\"Technology\","
-        "\"allocation_pct\":10,\"score\":78,\"bull_case\":\"...\","
-        "\"bear_risk\":\"...\",\"analyst_target\":230,\"current_price\":255}]\n}"
+        "You are a professional stock analyst. Analyse the following stocks and select the best 8 for a portfolio.\n\n"
+        f"STOCKS DATA:\n{stocks_summary}\n\n"
+        "INSTRUCTIONS:\n"
+        "- Select exactly 8 stocks\n"
+        "- Allocations must sum to exactly 100\n"
+        "- For bull_case and bear_case: use only plain text, NO apostrophes, NO quotes, NO special characters\n"
+        "- Keep bull_case and bear_case under 100 characters each\n"
+        "- All string values must use double quotes only\n\n"
+        "YOU MUST RESPOND WITH VALID JSON ONLY. NO EXPLANATION. NO MARKDOWN. NO BACKTICKS.\n"
+        "START YOUR RESPONSE WITH { AND END WITH }\n\n"
+        "REQUIRED FORMAT:\n"
+        '{"portfolio_name":"string","summary":"string","date":"YYYY-MM-DD",'
+        '"picks":[{"ticker":"string","name":"string","sector":"string",'
+        '"allocation":number,"ai_score":number,"price":number,'
+        '"analyst_target":number_or_null,"bull_case":"string","bear_risk":"string"}]}'
     )
-    response = client.messages.create(
-        model="claude-opus-4-6", max_tokens=2000,
-        messages=[{"role": "user", "content": prompt}]
-    )
-    raw = response.content[0].text
-    print(f"AI response length: {len(raw)}, first 100: {raw[:100]}")
-    return extract_json(raw)
+
+    print("Running AI analysis...")
+    for attempt in range(3):
+        try:
+            response = client.messages.create(
+                model="claude-opus-4-5",
+                max_tokens=2000,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            raw = response.content[0].text
+            print(f"AI response length: {len(raw)} chars")
+            print(f"AI response preview: {raw[:100]}")
+            result = clean_json(raw)
+
+            # Validate structure
+            if "picks" not in result:
+                raise ValueError("Missing 'picks' key in response")
+            if len(result["picks"]) < 5:
+                raise ValueError(f"Only {len(result['picks'])} picks returned, expected 8")
+
+            total_alloc = sum(p.get("allocation", 0) for p in result["picks"])
+            if not (95 <= total_alloc <= 105):
+                print(f"Warning: allocations sum to {total_alloc}, normalising...")
+                for p in result["picks"]:
+                    p["allocation"] = round(p["allocation"] * 100 / total_alloc, 1)
+
+            result["date"] = result.get("date", datetime.now().strftime("%Y-%m-%d"))
+            print(f"AI analysis complete: {len(result['picks'])} picks selected")
+            return result
+
+        except Exception as e:
+            print(f"AI analysis attempt {attempt + 1} failed: {e}")
+            if attempt < 2:
+                print("Retrying...")
+                time.sleep(5)
+
+    raise RuntimeError("AI analysis failed after 3 attempts - check logs above")
 
 
 def build_portfolio(client, status_callback=None):
